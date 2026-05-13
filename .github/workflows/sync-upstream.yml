@@ -1,0 +1,79 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # ทุกวันจันทร์ 9:00 UTC
+  workflow_dispatch: # รัน manual ได้
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/MisterTea/EternalTerminal.git || true
+          git fetch upstream
+
+      - name: Check for new commits
+        id: check
+        run: |
+          BEHIND=$(git rev-list HEAD..upstream/master --count)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Upstream is $BEHIND commits ahead"
+
+      - name: Merge upstream
+        if: steps.check.outputs.behind != '0'
+        id: merge
+        run: |
+          git merge upstream/master --no-edit 2>&1 | tee /tmp/merge-output.txt
+          if grep -q "CONFLICT" /tmp/merge-output.txt; then
+            echo "has_conflicts=true" >> "$GITHUB_OUTPUT"
+            git merge --abort
+          else
+            echo "has_conflicts=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push clean merge
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.has_conflicts == 'false'
+        run: |
+          git push origin master
+
+      - name: Create PR for conflicts
+        if: steps.check.outputs.behind != '0' && steps.merge.outputs.has_conflicts == 'true'
+        run: |
+          BRANCH="sync-upstream-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH"
+          git merge upstream/master --no-commit || true
+          git add -A
+          git commit -m "WIP: merge upstream (has conflicts)"
+          git push -u origin "$BRANCH"
+          gh pr create \
+            --title "Sync upstream — merge conflicts need review" \
+            --body "$(cat <<'EOF'
+          Automated upstream sync found merge conflicts.
+
+          Run locally:
+          ```
+          git fetch upstream
+          git merge upstream/master
+          # resolve conflicts
+          git push
+          ```
+          EOF
+          )" \
+            --label "upstream-sync"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
