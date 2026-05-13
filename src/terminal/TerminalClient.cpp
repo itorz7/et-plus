@@ -1,9 +1,74 @@
 #include "TerminalClient.hpp"
 
+#include <sys/stat.h>
+
+#include "LocalClipboardImage.hpp"
 #include "TelemetryService.hpp"
 #include "TunnelUtils.hpp"
 
 namespace et {
+
+#ifdef __APPLE__
+namespace {
+
+bool isImageExtension(const string& ext) {
+  return ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "gif" ||
+         ext == "tiff" || ext == "bmp" || ext == "webp";
+}
+
+optional<ClipboardImagePayload> readLocalFileAsImage(const string& path) {
+  struct stat st;
+  if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+    return nullopt;
+  }
+  if (static_cast<uint64_t>(st.st_size) > kMaxClipboardImageBytes ||
+      st.st_size <= 0) {
+    return nullopt;
+  }
+
+  size_t dot = path.rfind('.');
+  if (dot == string::npos || dot + 1 >= path.size()) {
+    return nullopt;
+  }
+  string ext = path.substr(dot + 1);
+  for (auto& c : ext) c = tolower(c);
+  if (!isImageExtension(ext)) {
+    return nullopt;
+  }
+
+  ifstream input(path, ios::binary);
+  if (!input) {
+    return nullopt;
+  }
+  string bytes((istreambuf_iterator<char>(input)), istreambuf_iterator<char>());
+  if (bytes.empty()) {
+    return nullopt;
+  }
+  if (ext == "jpeg") ext = "jpg";
+  return ClipboardImagePayload{ext, bytes};
+}
+
+string extractBracketedPasteContent(const string& input, size_t startPos,
+                                    size_t* endPos) {
+  static const string kPasteEnd = "\x1b[201~";
+  size_t end = input.find(kPasteEnd, startPos);
+  if (end == string::npos) {
+    *endPos = input.size();
+    return input.substr(startPos);
+  }
+  *endPos = end + kPasteEnd.size();
+  return input.substr(startPos, end - startPos);
+}
+
+string trimWhitespace(const string& s) {
+  size_t start = s.find_first_not_of(" \t\n\r");
+  if (start == string::npos) return "";
+  size_t end = s.find_last_not_of(" \t\n\r");
+  return s.substr(start, end - start + 1);
+}
+
+}  // namespace
+#endif
 
 TerminalClient::TerminalClient(
     shared_ptr<SocketHandler> _socketHandler,
@@ -12,10 +77,12 @@ TerminalClient::TerminalClient(
     const string& passkey, shared_ptr<Console> _console, bool jumphost,
     const string& tunnels, const string& reverseTunnels, bool forwardSshAgent,
     const string& identityAgent, int _keepaliveDuration,
-    const vector<pair<string, string>>& envVars)
+    const vector<pair<string, string>>& envVars,
+    bool _clipboardImagePasteSupported)
     : console(_console),
       shuttingDown(false),
-      keepaliveDuration(_keepaliveDuration) {
+      keepaliveDuration(_keepaliveDuration),
+      clipboardImagePasteSupported(_clipboardImagePasteSupported) {
   portForwardHandler = shared_ptr<PortForwardHandler>(
       new PortForwardHandler(_socketHandler, _pipeSocketHandler));
   InitialPayload payload;
@@ -159,16 +226,157 @@ void TerminalClient::run(const string& command, const bool noexit) {
   time_t keepaliveTime = time(NULL) + keepaliveDuration;
   bool waitingOnKeepalive = false;
 
-  if (command.length()) {
-    LOG(INFO) << "Got command: " << command;
+  auto sendTerminalBuffer = [&](const string& buffer) {
+    if (buffer.empty()) {
+      return;
+    }
     et::TerminalBuffer tb;
-    if (noexit)
-      tb.set_buffer(command + "\n");
-    else
-      tb.set_buffer(command + "; exit\n");
-
+    tb.set_buffer(buffer);
     connection->writePacket(
         Packet(TerminalPacketType::TERMINAL_BUFFER, protoToString(tb)));
+    keepaliveTime = time(NULL) + keepaliveDuration;
+  };
+
+  // Bracketed paste: accumulate content between \e[200~ and \e[201~
+  // across multiple read() chunks.  When complete, check if the pasted
+  // text is a local image file path — if so, send as image frame.
+  string pasteBuf;
+  bool inPaste = false;
+
+  auto flushPasteBuf = [&]() {
+    if (pasteBuf.empty()) {
+      inPaste = false;
+      return;
+    }
+#ifdef __APPLE__
+    const bool imagePasteEnabled =
+        clipboardImagePasteSupported &&
+        getenv("ET_DISABLE_CLIPBOARD_IMAGE_PASTE") == nullptr;
+    if (imagePasteEnabled) {
+      string trimmed = trimWhitespace(pasteBuf);
+      if (!trimmed.empty()) {
+        optional<ClipboardImagePayload> fileImage =
+            readLocalFileAsImage(trimmed);
+        if (fileImage) {
+          sendTerminalBuffer(encodeClipboardImageFrame(*fileImage));
+          pasteBuf.clear();
+          inPaste = false;
+          return;
+        }
+      }
+    }
+#endif
+    // Not an image — re-emit with bracketed paste markers
+    static const string kPS = "\x1b[200~";
+    static const string kPE = "\x1b[201~";
+    sendTerminalBuffer(kPS + pasteBuf + kPE);
+    pasteBuf.clear();
+    inPaste = false;
+  };
+
+  auto sendUserInput = [&](const string& input) {
+    static const string kPS = "\x1b[200~";
+    static const string kPE = "\x1b[201~";
+
+    // Debug: log raw input to ~/et-plus-debug.log (max 50KB, rotates)
+    if (getenv("ET_PLUS_DEBUG") != nullptr) {
+      const char* home = getenv("HOME");
+      if (home) {
+        string logPath = string(home) + "/et-plus-debug.log";
+        struct stat logSt;
+        if (::stat(logPath.c_str(), &logSt) == 0 && logSt.st_size > 50000) {
+          ::rename(logPath.c_str(), (logPath + ".old").c_str());
+        }
+        FILE* dbg = fopen(logPath.c_str(), "a");
+        if (dbg) {
+          fprintf(dbg, "[%d bytes] ", (int)input.size());
+          for (size_t j = 0; j < input.size() && j < 200; j++) {
+            unsigned char ch = input[j];
+            if (ch >= 32 && ch < 127)
+              fprintf(dbg, "%c", ch);
+            else
+              fprintf(dbg, "\\x%02x", ch);
+          }
+          if (input.size() > 200) fprintf(dbg, "...");
+          fprintf(dbg, "\n");
+          fclose(dbg);
+        }
+      }
+    }
+
+#ifdef __APPLE__
+    const bool imagePasteEnabled =
+        clipboardImagePasteSupported &&
+        getenv("ET_DISABLE_CLIPBOARD_IMAGE_PASTE") == nullptr;
+#endif
+
+    size_t i = 0;
+    while (i < input.size()) {
+      if (inPaste) {
+        // Look for paste-end marker in current data
+        size_t pePos = input.find(kPE, i);
+        if (pePos != string::npos) {
+          pasteBuf.append(input, i, pePos - i);
+          flushPasteBuf();
+          i = pePos + kPE.size();
+        } else {
+          // End marker not in this chunk — keep buffering
+          pasteBuf.append(input, i, input.size() - i);
+          return;
+        }
+        continue;
+      }
+
+      // Not in paste — look for paste-start marker
+      size_t psPos = input.find(kPS, i);
+
+      if (psPos == string::npos) {
+        // No paste start — process rest as normal input
+        string rest = input.substr(i);
+#ifdef __APPLE__
+        if (imagePasteEnabled) {
+          string passthrough;
+          for (char c : rest) {
+            if (c == 0x16) {
+              sendTerminalBuffer(passthrough);
+              passthrough.clear();
+              optional<ClipboardImagePayload> image =
+                  readLocalClipboardImage();
+              if (image) {
+                sendTerminalBuffer(encodeClipboardImageFrame(*image));
+              } else {
+                passthrough.push_back(c);
+              }
+            } else {
+              passthrough.push_back(c);
+            }
+          }
+          sendTerminalBuffer(passthrough);
+        } else
+#endif
+        {
+          sendTerminalBuffer(rest);
+        }
+        return;
+      }
+
+      // Send everything before paste start
+      if (psPos > i) {
+        sendTerminalBuffer(input.substr(i, psPos - i));
+      }
+
+      inPaste = true;
+      pasteBuf.clear();
+      i = psPos + kPS.size();
+    }
+  };
+
+  if (command.length()) {
+    LOG(INFO) << "Got command: " << command;
+    if (noexit)
+      sendTerminalBuffer(command + "\n");
+    else
+      sendTerminalBuffer(command + "; exit\n");
   }
 
   TerminalInfo lastTerminalInfo;
@@ -215,6 +423,7 @@ void TerminalClient::run(const string& command, const bool noexit) {
     tv.tv_usec = 10000;
     select(maxfd + 1, &rfd, NULL, NULL, &tv);
 
+
     try {
       if (console) {
         // Check for data to send.
@@ -241,12 +450,7 @@ void TerminalClient::run(const string& command, const bool noexit) {
               }
             }
             if (s.length()) {
-              et::TerminalBuffer tb;
-              tb.set_buffer(s);
-
-              connection->writePacket(Packet(
-                  TerminalPacketType::TERMINAL_BUFFER, protoToString(tb)));
-              keepaliveTime = time(NULL) + keepaliveDuration;
+              sendUserInput(s);
             }
           }
 #else
@@ -257,12 +461,7 @@ void TerminalClient::run(const string& command, const bool noexit) {
               // VLOG(1) << "Sending byte: " << int(b) << " " << char(b) << " "
               // << connection->getWriter()->getSequenceNumber();
               string s(b, rc);
-              et::TerminalBuffer tb;
-              tb.set_buffer(s);
-
-              connection->writePacket(Packet(
-                  TerminalPacketType::TERMINAL_BUFFER, protoToString(tb)));
-              keepaliveTime = time(NULL) + keepaliveDuration;
+              sendUserInput(s);
             } else if (rc == 0) {
               LOG(INFO) << "Console EOF";
               break;

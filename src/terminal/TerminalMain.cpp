@@ -1,5 +1,6 @@
 #include <cxxopts.hpp>
 
+#include "ClipboardImageFrame.hpp"
 #include "DaemonCreator.hpp"
 #include "LogHandler.hpp"
 #include "ParseConfigFile.hpp"
@@ -150,6 +151,8 @@ int main(int argc, char** argv) {
       // Install log rotation callback
       el::Helpers::installPreRollOutCallback(LogHandler::rolloutHandler);
 
+      CLOG(INFO, "stdout") << "ETCAPS:" << kClipboardImagePasteCapability
+                            << endl;
       CLOG(INFO, "stdout") << "IDPASSKEY:" << idpasskey << endl;
       if (DaemonCreator::createSessionLeader() == -1) {
         STFATAL << "Error creating daemon: " << strerror(GetErrno());
@@ -182,6 +185,8 @@ int main(int argc, char** argv) {
 
     UserTerminalHandler uth(ipcSocketHandler, term, true,
                             serverFifo.getEndpointForConnect(), idpasskey);
+    CLOG(INFO, "stdout") << "ETCAPS:" << kClipboardImagePasteCapability
+                          << endl;
     CLOG(INFO, "stdout") << "IDPASSKEY:" << idpasskey << endl;
     if (DaemonCreator::createSessionLeader() == -1) {
       STFATAL << "Error creating daemon: " << strerror(GetErrno());

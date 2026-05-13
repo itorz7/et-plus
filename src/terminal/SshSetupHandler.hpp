@@ -26,11 +26,16 @@ class SshSetupHandler {
       int vlevel, const string& etterminal_path, const string& serverFifo,
       const std::vector<std::string>& ssh_options);
 
+  bool supportsClipboardImagePaste() const {
+    return supportsClipboardImagePaste_;
+  }
+
   /** @brief Path to the packaged `etterminal` helper binary. */
   static const string ETTERMINAL_BIN;
 
  private:
   shared_ptr<SubprocessUtils> subprocessUtils_;
+  bool supportsClipboardImagePaste_ = false;
 };
 }  // namespace et
 #endif  // __ET_SSH_SETUP_HANDLER__

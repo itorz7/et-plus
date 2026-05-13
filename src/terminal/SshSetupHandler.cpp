@@ -1,7 +1,42 @@
 #include "SshSetupHandler.hpp"
 
+#include "ClipboardImageFrame.hpp"
+
 namespace et {
 const string SshSetupHandler::ETTERMINAL_BIN = "etterminal";
+
+namespace {
+
+bool outputHasCapability(const string& output, const string& capability) {
+  const string marker = "ETCAPS:";
+  size_t cursor = 0;
+  while (cursor < output.size()) {
+    size_t lineEnd = output.find('\n', cursor);
+    if (lineEnd == string::npos) {
+      lineEnd = output.size();
+    }
+
+    string line = output.substr(cursor, lineEnd - cursor);
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    if (line.rfind(marker, 0) == 0) {
+      string capabilities = line.substr(marker.size());
+      stringstream stream(capabilities);
+      string item;
+      while (getline(stream, item, ',')) {
+        if (item == capability) {
+          return true;
+        }
+      }
+    }
+
+    cursor = lineEnd + 1;
+  }
+  return false;
+}
+
+}  // namespace
 
 string genCommand(const string& passkey, const string& id,
                   const string& clientTerm, const string& user, bool kill,
@@ -28,6 +63,7 @@ pair<string, string> SshSetupHandler::SetupSsh(
     const string& jumphost, const string& jServerFifo, bool kill, int vlevel,
     const string& cmd_prefix, const string& serverFifo,
     const std::vector<std::string>& ssh_options) {
+  supportsClipboardImagePaste_ = false;
   string clientTerm("xterm-256color");
   auto envString = getenv("TERM");
   if (envString != NULL) {
@@ -99,6 +135,8 @@ pair<string, string> SshSetupHandler::SetupSsh(
           "print anything in server's .bashrc/.zshrc. Server output: " +
           sshBuffer);
     }
+    supportsClipboardImagePaste_ =
+        outputHasCapability(sshBuffer, kClipboardImagePasteCapability);
     auto idpasskey = sshBuffer.substr(passKeyIndex + 10, 16 + 1 + 32);
     auto idpasskey_splited = split(idpasskey, '/');
     id = idpasskey_splited[0];

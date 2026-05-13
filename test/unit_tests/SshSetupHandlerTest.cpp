@@ -59,6 +59,19 @@ class FakeSshSubprocessHandlerInvalid : public SubprocessUtils {
   }
 };
 
+class FakeSshSubprocessHandlerWithClipboardImagePaste : public SubprocessUtils {
+ public:
+  string SubprocessToStringInteractive(const string& command,
+                                       const vector<string>& args) override {
+    REQUIRE(command == "ssh");
+
+    string id = genRandomAlphaNum(16);
+    string passkey = genRandomAlphaNum(32);
+    return string("ETCAPS:clipboard-image-paste\nIDPASSKEY:") + id + "/" +
+           passkey;
+  }
+};
+
 /**
  * @brief Fake subprocess handler that simulates jumphost setup.
  */
@@ -109,7 +122,32 @@ TEST_CASE("SshSetupHandler basic connection", "[SshSetupHandler]") {
     // Verify id and passkey have expected lengths
     REQUIRE(id.length() == 16);
     REQUIRE(passkey.length() == 32);
+    REQUIRE_FALSE(handler.supportsClipboardImagePaste());
   }
+}
+
+TEST_CASE("SshSetupHandler detects clipboard image paste capability",
+          "[SshSetupHandler]") {
+  auto fakeSubprocess =
+      make_shared<FakeSshSubprocessHandlerWithClipboardImagePaste>();
+  SshSetupHandler handler(fakeSubprocess);
+
+  auto [id, passkey] = handler.SetupSsh("testuser",  // user
+                                        "testhost",  // host
+                                        "testhost",  // host_alias
+                                        2022,        // port
+                                        "",          // jumphost (empty)
+                                        "",          // jServerFifo
+                                        false,       // kill
+                                        0,           // vlevel
+                                        "",          // etterminal_path
+                                        "",          // serverFifo
+                                        std::vector<string>()  // ssh_options
+  );
+
+  REQUIRE(id.length() == 16);
+  REQUIRE(passkey.length() == 32);
+  REQUIRE(handler.supportsClipboardImagePaste());
 }
 
 TEST_CASE("SshSetupHandler with custom options", "[SshSetupHandler]") {

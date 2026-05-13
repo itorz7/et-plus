@@ -1,6 +1,7 @@
 #ifndef WIN32
 #include "UserTerminalHandler.hpp"
 
+#include "ClipboardImageFrame.hpp"
 #include "ETerminal.pb.h"
 #include "RawSocketUtils.hpp"
 #include "ServerConnection.hpp"
@@ -153,8 +154,23 @@ void UserTerminalHandler::runUserTerminal(int masterFd) {
                 socketHandler->readProto<TerminalBuffer>(routerFd, false);
             VLOG(4) << "Read from router";
             const string &buffer = tb.buffer();
-            RawSocketUtils::writeAll(masterFd, &buffer[0], buffer.length());
-            VLOG(4) << "Write to terminal";
+            ClipboardImageSaveResult imageResult =
+                saveClipboardImageFrameToTemp(buffer);
+            if (imageResult.isFrame) {
+              if (imageResult.saved) {
+                string imagePath = imageResult.path + " ";
+                RawSocketUtils::writeAll(masterFd, imagePath.data(),
+                                         imagePath.length());
+                VLOG(4) << "Wrote clipboard image path to terminal";
+              } else {
+                LOG(WARNING) << "Clipboard image paste failed: "
+                             << imageResult.error;
+              }
+            } else {
+              RawSocketUtils::writeAll(masterFd, buffer.data(),
+                                       buffer.length());
+              VLOG(4) << "Write to terminal";
+            }
             break;
           }
           case TERMINAL_INFO: {
