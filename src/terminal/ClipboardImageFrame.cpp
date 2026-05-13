@@ -1,6 +1,7 @@
 #include "ClipboardImageFrame.hpp"
 
 #include <cctype>
+#include <functional>
 
 namespace et {
 namespace {
@@ -142,8 +143,22 @@ ClipboardImageSaveResult saveClipboardImageFrameToTemp(const string& frame) {
   }
   chmod(directory.c_str(), 0700);
 
-  string pathTemplate = directory + "/image-XXXXXX";
-  int fd = mkstemp(&pathTemplate[0]);
+  // Use content hash as filename so identical images reuse the same path
+  size_t contentHash = hash<string>{}(payload.bytes);
+  char hashStr[17];
+  snprintf(hashStr, sizeof(hashStr), "%016zx", contentHash);
+  string finalPath = directory + "/" + hashStr + "." + payload.extension;
+
+  struct stat existingStat;
+  if (::stat(finalPath.c_str(), &existingStat) == 0 &&
+      static_cast<size_t>(existingStat.st_size) == payload.bytes.size()) {
+    result.saved = true;
+    result.path = finalPath;
+    return result;
+  }
+
+  string tmpPath = finalPath + ".tmp";
+  int fd = open(tmpPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
   if (fd < 0) {
     result.error = string("could not create temp image file: ") +
                    strerror(errno);
@@ -154,22 +169,21 @@ ClipboardImageSaveResult saveClipboardImageFrameToTemp(const string& frame) {
     result.error = string("could not write temp image file: ") +
                    strerror(errno);
     close(fd);
-    unlink(pathTemplate.c_str());
+    unlink(tmpPath.c_str());
     return result;
   }
 
   if (close(fd) < 0) {
     result.error = string("could not close temp image file: ") +
                    strerror(errno);
-    unlink(pathTemplate.c_str());
+    unlink(tmpPath.c_str());
     return result;
   }
 
-  string finalPath = pathTemplate + "." + payload.extension;
-  if (rename(pathTemplate.c_str(), finalPath.c_str()) < 0) {
+  if (rename(tmpPath.c_str(), finalPath.c_str()) < 0) {
     result.error = string("could not rename temp image file: ") +
                    strerror(errno);
-    unlink(pathTemplate.c_str());
+    unlink(tmpPath.c_str());
     return result;
   }
 
