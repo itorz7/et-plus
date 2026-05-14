@@ -16,35 +16,56 @@ bool isImageExtension(const string& ext) {
          ext == "tiff" || ext == "bmp" || ext == "webp";
 }
 
+void debugImageLog(const string& msg) {
+  const char* home = getenv("HOME");
+  if (!home || getenv("ET_PLUS_DEBUG") == nullptr) return;
+  string logPath = string(home) + "/et-plus-image-debug.log";
+  FILE* f = fopen(logPath.c_str(), "a");
+  if (f) {
+    fprintf(f, "%s\n", msg.c_str());
+    fclose(f);
+  }
+}
+
 optional<ClipboardImagePayload> readLocalFileAsImage(const string& path) {
+  debugImageLog("readLocalFileAsImage: path=[" + path + "]");
+
   struct stat st;
   if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+    debugImageLog("  stat failed or not regular file, errno=" +
+                  to_string(errno));
     return nullopt;
   }
   if (static_cast<uint64_t>(st.st_size) > kMaxClipboardImageBytes ||
       st.st_size <= 0) {
+    debugImageLog("  size out of range: " + to_string(st.st_size));
     return nullopt;
   }
 
   size_t dot = path.rfind('.');
   if (dot == string::npos || dot + 1 >= path.size()) {
+    debugImageLog("  no file extension found");
     return nullopt;
   }
   string ext = path.substr(dot + 1);
   for (auto& c : ext) c = tolower(c);
   if (!isImageExtension(ext)) {
+    debugImageLog("  extension not recognized: " + ext);
     return nullopt;
   }
 
   ifstream input(path, ios::binary);
   if (!input) {
+    debugImageLog("  could not open file");
     return nullopt;
   }
   string bytes((istreambuf_iterator<char>(input)), istreambuf_iterator<char>());
   if (bytes.empty()) {
+    debugImageLog("  file was empty");
     return nullopt;
   }
   if (ext == "jpeg") ext = "jpg";
+  debugImageLog("  success: " + to_string(bytes.size()) + " bytes, ext=" + ext);
   return ClipboardImagePayload{ext, bytes};
 }
 
@@ -65,6 +86,30 @@ string trimWhitespace(const string& s) {
   if (start == string::npos) return "";
   size_t end = s.find_last_not_of(" \t\n\r");
   return s.substr(start, end - start + 1);
+}
+
+string unescapeShellPath(const string& s) {
+  string result;
+  result.reserve(s.size());
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] == '\\' && i + 1 < s.size()) {
+      result += s[i + 1];
+      i++;
+    } else {
+      result += s[i];
+    }
+  }
+  return result;
+}
+
+// Strip matching outer quotes (single or double) from a path string
+string stripOuterQuotes(const string& s) {
+  if (s.size() >= 2 &&
+      ((s.front() == '\'' && s.back() == '\'') ||
+       (s.front() == '"' && s.back() == '"'))) {
+    return s.substr(1, s.size() - 2);
+  }
+  return s;
 }
 
 }  // namespace
@@ -249,14 +294,27 @@ void TerminalClient::run(const string& command, const bool noexit) {
       return;
     }
 #ifdef __APPLE__
+    debugImageLog("flushPasteBuf: pasteBuf=[" + pasteBuf + "] len=" +
+                  to_string(pasteBuf.size()));
     const bool imagePasteEnabled =
-        clipboardImagePasteSupported &&
+        (clipboardImagePasteSupported ||
+         getenv("ET_FORCE_CLIPBOARD_IMAGE_PASTE") != nullptr) &&
         getenv("ET_DISABLE_CLIPBOARD_IMAGE_PASTE") == nullptr;
+    debugImageLog("imagePasteEnabled=" + string(imagePasteEnabled ? "true" : "false") +
+                  " clipboardImagePasteSupported=" +
+                  string(clipboardImagePasteSupported ? "true" : "false"));
     if (imagePasteEnabled) {
       string trimmed = trimWhitespace(pasteBuf);
+      trimmed = stripOuterQuotes(trimmed);
       if (!trimmed.empty()) {
         optional<ClipboardImagePayload> fileImage =
             readLocalFileAsImage(trimmed);
+        if (!fileImage) {
+          string unescaped = unescapeShellPath(trimmed);
+          if (unescaped != trimmed) {
+            fileImage = readLocalFileAsImage(unescaped);
+          }
+        }
         if (fileImage) {
           sendTerminalBuffer(encodeClipboardImageFrame(*fileImage));
           pasteBuf.clear();
@@ -306,7 +364,8 @@ void TerminalClient::run(const string& command, const bool noexit) {
 
 #ifdef __APPLE__
     const bool imagePasteEnabled =
-        clipboardImagePasteSupported &&
+        (clipboardImagePasteSupported ||
+         getenv("ET_FORCE_CLIPBOARD_IMAGE_PASTE") != nullptr) &&
         getenv("ET_DISABLE_CLIPBOARD_IMAGE_PASTE") == nullptr;
 #endif
 
