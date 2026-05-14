@@ -1,6 +1,6 @@
 # et-plus
 
-EternalTerminal fork with **clipboard image paste** for remote AI tools like Claude Code and Codex.
+A fork of [Eternal Terminal (ET)](https://github.com/MisterTea/EternalTerminal) with **clipboard image paste** for remote AI tools like Claude Code and Codex.
 
 Copy an image on your Mac, press `Ctrl+V` or `Cmd+V` in an ET session, and the image lands on the remote server as a file. The remote path is typed into your terminal automatically.
 
